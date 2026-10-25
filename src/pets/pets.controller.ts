@@ -226,8 +226,9 @@ export class PetsController {
     schema: {
       example: {
         petId: '550e8400-e29b-41d4-a716-446655440000',
+        storedStatus: 'AVAILABLE',
         replayedStatus: 'AVAILABLE',
-        dbAvailable: true,
+        computedStatus: 'AVAILABLE',
         isMatch: true,
         eventCount: 3,
         message: 'Pet availability is correctly synchronized',

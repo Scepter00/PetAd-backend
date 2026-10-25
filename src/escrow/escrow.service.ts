@@ -8,6 +8,8 @@ import {
   EventType,
 } from '@prisma/client';
 import { AdoptionStateMachine } from '../adoption/services/adoption-state-machine.service';
+import { PetAvailabilityService } from '../pets/services/pet-availability.service';
+import { PetStatus } from '../common/enums/pet-status.enum';
 
 @Injectable()
 export class EscrowService {
@@ -15,6 +17,7 @@ export class EscrowService {
     private readonly prisma: PrismaService,
     private readonly events: EventsService,
     private readonly adoptionStateMachine: AdoptionStateMachine,
+    private readonly petAvailabilityService: PetAvailabilityService,
   ) {}
 
   async createEscrow(amount: number, tx?: any) {
@@ -71,6 +74,12 @@ export class EscrowService {
         this.adoptionStateMachine.assertValidTransition(
           adoption.status,
           AdoptionStatus.COMPLETED,
+        );
+
+        await this.petAvailabilityService.transition(
+          adoption.petId,
+          PetStatus.ADOPTED,
+          tx,
         );
 
         await tx.adoption.update({

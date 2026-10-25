@@ -25,6 +25,9 @@ const mockPrisma = {
     delete: jest.fn(),
     count: jest.fn(),
   },
+  adoption: { findMany: jest.fn() },
+  custody: { findMany: jest.fn() },
+  eventLog: { findMany: jest.fn() },
 };
 
 const mockPetsRepository = {
