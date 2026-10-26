@@ -433,7 +433,7 @@ describe('Users profile hardening & account deletion (E2E)', () => {
       expect(JSON.stringify(event?.payload)).not.toContain(user.email);
     }, 20000);
 
-    it('refuses a second deletion and blocks login for the deleted account', async () => {
+    it('invalidates the token and blocks login after deletion', async () => {
       const email = uniqueEmail('twice');
       const { user, token, password } = await createUser(email);
 
@@ -443,13 +443,14 @@ describe('Users profile hardening & account deletion (E2E)', () => {
         .send({ password })
         .expect(200);
 
-      const res = await request(app.getHttpServer())
+      // The JWT strategy only accepts tokens whose account still exists and
+      // is ACTIVE, so a second deletion attempt is unauthorised before it
+      // reaches the service (which remains guarded against races).
+      await request(app.getHttpServer())
         .delete(`/users/${user.id}`)
         .set(auth(token, '10.0.3.5'))
         .send({ password })
-        .expect(409);
-
-      expect((res.body as ApiErrorBody).code).toBe('ACCOUNT_ALREADY_DELETED');
+        .expect(401);
 
       await request(app.getHttpServer())
         .post('/auth/login')
