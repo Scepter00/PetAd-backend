@@ -19,10 +19,14 @@ import { RejectAdoptionDto } from './dto/reject-adoption.dto';
 import { NotificationQueueService } from '../jobs/services/notification-queue.service';
 import { AdoptionStateMachine } from './services/adoption-state-machine.service';
 import { EventLedgerService } from '../event-ledger/event-ledger.service';
+import { PetAvailabilityService } from '../pets/services/pet-availability.service';
+import { PetStatus } from '../common/enums/pet-status.enum';
 
 /** Maps an AdoptionStatus to its corresponding EventType, if one exists. */
 const ADOPTION_STATUS_EVENT_MAP: Partial<Record<AdoptionStatus, EventType>> = {
   [AdoptionStatus.APPROVED]: EventType.ADOPTION_APPROVED,
+  [AdoptionStatus.REJECTED]: EventType.ADOPTION_REJECTED,
+  [AdoptionStatus.CANCELLED]: EventType.ADOPTION_CANCELLED,
   [AdoptionStatus.COMPLETED]: EventType.ADOPTION_COMPLETED,
 };
 
@@ -34,11 +38,41 @@ export class AdoptionService {
     private readonly prisma: PrismaService,
     private readonly events: EventsService,
     private readonly adoptionStateMachine: AdoptionStateMachine,
+    private readonly petAvailabilityService: PetAvailabilityService,
     @Optional()
     private readonly eventLedgerService?: EventLedgerService,
     @Optional()
     private readonly notificationQueueService?: NotificationQueueService,
   ) {}
+
+  /**
+   * Loads a single adoption with its pet and participants.
+   * Resource-level authorization is enforced by PoliciesGuard before this runs.
+   *
+   * @throws NotFoundException if the adoption does not exist
+   */
+  async findOne(adoptionId: string) {
+    const adoption = await this.prisma.adoption.findUnique({
+      where: { id: adoptionId },
+      include: {
+        pet: {
+          select: { id: true, name: true, species: true, imageUrl: true },
+        },
+        adopter: {
+          select: { id: true, firstName: true, lastName: true, email: true },
+        },
+        owner: {
+          select: { id: true, firstName: true, lastName: true, email: true },
+        },
+      },
+    });
+
+    if (!adoption) {
+      throw new NotFoundException(`Adoption with id "${adoptionId}" not found`);
+    }
+
+    return adoption;
+  }
 
   /**
    * Creates an adoption request and fires an ADOPTION_REQUESTED event.
@@ -74,6 +108,12 @@ export class AdoptionService {
       if (activeAdoption) {
         throw new ConflictException('Pet is not available for adoption');
       }
+
+      await this.petAvailabilityService.transition(
+        dto.petId,
+        PetStatus.PENDING,
+        tx,
+      );
 
       const adoption = await tx.adoption.create({
         data: {
@@ -116,20 +156,52 @@ export class AdoptionService {
     actorId: string,
     dto: UpdateAdoptionStatusDto,
   ) {
-    const existing = await this.prisma.adoption.findUnique({
-      where: { id: adoptionId },
-    });
+    const { existing, updated } = await this.prisma.$transaction(async (tx) => {
+      const existing = await tx.adoption.findUnique({
+        where: { id: adoptionId },
+      });
 
-    if (!existing) {
-      throw new NotFoundException(`Adoption with id "${adoptionId}" not found`);
-    }
+      if (!existing) {
+        throw new NotFoundException(
+          `Adoption with id "${adoptionId}" not found`,
+        );
+      }
 
     // Enforce state machine before updating
-    this.adoptionStateMachine.assertValidTransition(existing.status, dto.status);
+    this.adoptionStateMachine.assertValidTransition(
+      existing.status,
+      dto.status,
+    );
 
-    const updated = await this.prisma.adoption.update({
-      where: { id: adoptionId },
-      data: { status: dto.status },
+      if (
+        dto.status === AdoptionStatus.REJECTED ||
+        dto.status === AdoptionStatus.CANCELLED
+      ) {
+        await this.petAvailabilityService.transition(
+          existing.petId,
+          PetStatus.AVAILABLE,
+          tx,
+        );
+      } else if (dto.status === AdoptionStatus.COMPLETED) {
+        await this.petAvailabilityService.transition(
+          existing.petId,
+          PetStatus.ADOPTED,
+          tx,
+        );
+      } else {
+        await this.petAvailabilityService.assertCurrentStatus(
+          existing.petId,
+          PetStatus.PENDING,
+          tx,
+        );
+      }
+
+      const updated = await tx.adoption.update({
+        where: { id: adoptionId },
+        data: { status: dto.status },
+      });
+
+      return { existing, updated };
     });
 
     this.logger.log(
@@ -161,20 +233,17 @@ export class AdoptionService {
           });
 
           if (adopter?.email) {
-            await this.notificationQueueService.enqueueSendTransactionalEmail(
-              {
-                dto: {
-                  to: adopter.email,
-                  subject: `PetAd: Adoption ${dto.status}`,
-                  text: `Hello! Your adoption has been updated to ${dto.status}.`,
-                },
-                metadata: { adoptionId, newStatus: dto.status },
+            await this.notificationQueueService.enqueueSendTransactionalEmail({
+              dto: {
+                to: adopter.email,
+                subject: `PetAd: Adoption ${dto.status}`,
+                text: `Hello! Your adoption has been updated to ${dto.status}.`,
               },
-            );
+              metadata: { adoptionId, newStatus: dto.status },
+            });
           }
         } catch (error) {
-          const reason =
-            error instanceof Error ? error.message : String(error);
+          const reason = error instanceof Error ? error.message : String(error);
           this.logger.error(
             `Failed to enqueue adoption notification email | adoptionId=${adoptionId} | reason=${reason}`,
           );
@@ -190,7 +259,7 @@ export class AdoptionService {
    * Changes adoption status from PENDING to APPROVED.
    * Sets approvedAt timestamp.
    * Fires ADOPTION_APPROVED event.
-   * 
+   *
    * @throws NotFoundException if adoption doesn't exist
    * @throws DomainException if adoption is not in PENDING status
    */
@@ -200,18 +269,27 @@ export class AdoptionService {
         where: { id: adoptionId },
         include: {
           pet: true,
-          adopter: { select: { id: true, email: true, firstName: true, lastName: true } },
+          adopter: {
+            select: { id: true, email: true, firstName: true, lastName: true },
+          },
         },
       });
 
       if (!adoption) {
-        throw new NotFoundException(`Adoption with id "${adoptionId}" not found`);
+        throw new NotFoundException(
+          `Adoption with id "${adoptionId}" not found`,
+        );
       }
 
       // Validate state transition
       this.adoptionStateMachine.assertValidTransition(
         adoption.status,
         AdoptionStatus.APPROVED,
+      );
+      await this.petAvailabilityService.assertCurrentStatus(
+        adoption.petId,
+        PetStatus.PENDING,
+        tx,
       );
 
       // Update adoption status to APPROVED
@@ -325,7 +403,7 @@ export class AdoptionService {
    * Changes adoption status from PENDING to REJECTED.
    * Updates pet status back to AVAILABLE (frees the pet for other adopters).
    * Optionally stores rejection reason in notes field.
-   * 
+   *
    * @throws NotFoundException if adoption doesn't exist
    * @throws DomainException if adoption is not in PENDING status
    */
@@ -339,12 +417,16 @@ export class AdoptionService {
         where: { id: adoptionId },
         include: {
           pet: true,
-          adopter: { select: { id: true, email: true, firstName: true, lastName: true } },
+          adopter: {
+            select: { id: true, email: true, firstName: true, lastName: true },
+          },
         },
       });
 
       if (!adoption) {
-        throw new NotFoundException(`Adoption with id "${adoptionId}" not found`);
+        throw new NotFoundException(
+          `Adoption with id "${adoptionId}" not found`,
+        );
       }
 
       // Validate state transition
@@ -397,10 +479,6 @@ export class AdoptionService {
         `Adoption ${adoptionId} rejected by admin ${adminId}. Pet ${adoption.petId} is now available for other adopters.${dto.reason ? ` Reason: ${dto.reason}` : ''}`,
       );
 
-      // Log event (no specific ADOPTION_REJECTED event in schema, but we could add it or use a generic approach)
-      // For now, we'll skip the event log since ADOPTION_REJECTED is not in the EventType enum
-      // If needed, this can be added to the schema later
-
       // Best-effort: enqueue notification email
       if (this.notificationQueueService && adoption.adopter.email) {
         try {
@@ -431,10 +509,12 @@ export class AdoptionService {
    * - SHELTER: Sees only adoptions where they are the owner (plus query filters)
    * - USER: Sees only adoptions where they are the adopter (plus query filters)
    */
-  async findAll(user: any, query: import('./dto/filter-adoptions.dto').FilterAdoptionsDto) {
+  async findAll(
+    user: any,
+    query: import('./dto/filter-adoptions.dto').FilterAdoptionsDto,
+  ) {
     let where: Prisma.AdoptionWhereInput = { ...query };
 
-    // Standardize getting the user ID (could be id or userId depending on the JWT payload)
     const currentUserId = user.id || user.userId;
 
     if (user.role === 'ADMIN') {
@@ -442,7 +522,6 @@ export class AdoptionService {
     } else if (user.role === 'SHELTER') {
       where = { ...query, ownerId: currentUserId };
     } else {
-      // Default to USER role restrictions
       where = { ...query, adopterId: currentUserId };
     }
 
@@ -455,7 +534,7 @@ export class AdoptionService {
             id: true,
             name: true,
             species: true,
-            imageUrl: true, // as per Prisma schema
+            imageUrl: true,
           },
         },
         adopter: {
@@ -464,7 +543,6 @@ export class AdoptionService {
             firstName: true,
             lastName: true,
             email: true,
-            // crucial: password is not included
           },
         },
       },

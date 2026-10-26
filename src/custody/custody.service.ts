@@ -13,6 +13,8 @@ import { CreateCustodyDto } from './dto/create-custody.dto';
 import { CustodyResponseDto } from './dto/custody-response.dto';
 import { CustodyStatus } from '@prisma/client';
 import { NotificationQueueService } from '../jobs/services/notification-queue.service';
+import { PetAvailabilityService } from '../pets/services/pet-availability.service';
+import { PetStatus } from '../common/enums/pet-status.enum';
 
 @Injectable()
 export class CustodyService {
@@ -22,6 +24,7 @@ export class CustodyService {
     private readonly escrowService: EscrowService,
     private readonly usersService: UsersService,
     private readonly stateMachine: CustodyStateMachine,
+    private readonly petAvailabilityService: PetAvailabilityService,
     @Optional()
     private readonly notificationQueueService?: NotificationQueueService,
   ) {}
@@ -64,9 +67,7 @@ export class CustodyService {
     });
 
     if (activeAdoption) {
-      throw new BadRequestException(
-        'Pet has an active adoption in progress',
-      );
+      throw new BadRequestException('Pet has an active adoption in progress');
     }
 
     // Check if pet has an active custody
@@ -95,9 +96,7 @@ export class CustodyService {
 
     // Validate durationDays range (1-90)
     if (durationDays < 1 || durationDays > 90) {
-      throw new BadRequestException(
-        'Duration must be between 1 and 90 days',
-      );
+      throw new BadRequestException('Duration must be between 1 and 90 days');
     }
 
     // Calculate endDate
@@ -112,17 +111,14 @@ export class CustodyService {
 
       // Create escrow if deposit amount is provided
       if (depositAmount !== undefined && depositAmount !== null) {
-        const escrow = await this.escrowService.createEscrow(
-          depositAmount,
-          tx,
-        );
+        const escrow = await this.escrowService.createEscrow(depositAmount, tx);
         escrowId = escrow.id;
       }
 
       // Create custody record
       const custodyRecord = await tx.custody.create({
         data: {
-          status: CustodyStatus.PENDING,
+          status: CustodyStatus.ACTIVE,
           type: 'TEMPORARY',
           holderId: userId,
           petId,
@@ -135,6 +131,12 @@ export class CustodyService {
           pet: true,
         },
       });
+
+      await this.petAvailabilityService.transition(
+        petId,
+        PetStatus.IN_CUSTODY,
+        tx,
+      );
 
       return custodyRecord;
     });
@@ -172,10 +174,9 @@ export class CustodyService {
           });
         }
       } catch (error) {
-        const reason =
-          error instanceof Error ? error.message : String(error);
+        const reason = error instanceof Error ? error.message : String(error);
         // Intentionally using Nest logger semantics; don't fail request due to async email.
-        // eslint-disable-next-line no-console
+
         console.error(
           `Failed to enqueue custody notification email | custodyId=${custody.id} | reason=${reason}`,
         );
@@ -200,6 +201,12 @@ export class CustodyService {
       this.stateMachine.assertCanTransition(
         custody.status,
         CustodyStatus.RETURNED,
+      );
+
+      await this.petAvailabilityService.transition(
+        custody.petId,
+        PetStatus.AVAILABLE,
+        tx,
       );
 
       const updatedCustody = await tx.custody.update({
@@ -249,6 +256,12 @@ export class CustodyService {
       this.stateMachine.assertCanTransition(
         custody.status,
         CustodyStatus.VIOLATION,
+      );
+
+      await this.petAvailabilityService.transition(
+        custody.petId,
+        PetStatus.AVAILABLE,
+        tx,
       );
 
       const updatedCustody = await tx.custody.update({
@@ -303,6 +316,14 @@ export class CustodyService {
         custody.status,
         CustodyStatus.CANCELLED,
       );
+
+      if (custody.status === CustodyStatus.ACTIVE) {
+        await this.petAvailabilityService.transition(
+          custody.petId,
+          PetStatus.AVAILABLE,
+          tx,
+        );
+      }
 
       const updatedCustody = await tx.custody.update({
         where: { id: custodyId },

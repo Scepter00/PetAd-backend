@@ -8,6 +8,7 @@ import { EscrowService } from '../escrow/escrow.service';
 import { UsersService } from '../users/users.service';
 import { NotificationQueueService } from '../jobs/services/notification-queue.service';
 import { CreateCustodyDto } from './dto/create-custody.dto';
+import { PetAvailabilityService } from '../pets/services/pet-availability.service';
 
 describe('CustodyService', () => {
   let service: CustodyService;
@@ -45,6 +46,10 @@ describe('CustodyService', () => {
     addJob: jest.fn(),
   };
 
+  const mockPetAvailabilityService = {
+    transition: jest.fn().mockResolvedValue('IN_CUSTODY'),
+  };
+
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -69,6 +74,10 @@ describe('CustodyService', () => {
         {
           provide: NotificationQueueService,
           useValue: mockNotificationQueueService,
+        },
+        {
+          provide: PetAvailabilityService,
+          useValue: mockPetAvailabilityService,
         },
       ],
     }).compile();
@@ -565,7 +574,7 @@ describe('CustodyService', () => {
         petId: 'pet-123',
         startDate: futureDate.toISOString(),
         durationDays: 14,
-        depositAmount: 250.50,
+        depositAmount: 250.5,
       };
 
       const mockPet = {
@@ -578,7 +587,7 @@ describe('CustodyService', () => {
         id: 'escrow-456',
         stellarPublicKey: 'ESCROW_PUBLIC_KEY',
         stellarSecretEncrypted: 'ENCRYPTED_SECRET',
-        amount: 250.50,
+        amount: 250.5,
         status: 'CREATED',
       };
 
@@ -590,7 +599,7 @@ describe('CustodyService', () => {
         petId: 'pet-123',
         startDate: new Date(dto.startDate),
         endDate: new Date(),
-        depositAmount: 250.50,
+        depositAmount: 250.5,
         escrowId: 'escrow-456',
         createdAt: new Date(),
         updatedAt: new Date(),
@@ -615,7 +624,7 @@ describe('CustodyService', () => {
       expect(result).toBeDefined();
       expect(result.escrowId).toBe('escrow-456');
       expect(mockEscrowService.createEscrow).toHaveBeenCalledWith(
-        250.50,
+        250.5,
         expect.anything(),
       );
     });
@@ -725,6 +734,11 @@ describe('CustodyService', () => {
           depositAmount: 100,
         },
       });
+      expect(mockPetAvailabilityService.transition).toHaveBeenCalledWith(
+        'pet-123',
+        'IN_CUSTODY',
+        expect.any(Object),
+      );
     });
   });
 

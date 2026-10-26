@@ -12,10 +12,7 @@ import { Request, Response } from 'express';
 export class LoggingInterceptor implements NestInterceptor {
   constructor(private readonly loggingService: LoggingService) {}
 
-  intercept(
-    context: ExecutionContext,
-    next: CallHandler,
-  ): Observable<any> {
+  intercept(context: ExecutionContext, next: CallHandler): Observable<any> {
     const ctx = context.switchToHttp();
     const request = ctx.getRequest<Request>();
     const response = ctx.getResponse<Response>();
@@ -37,6 +34,7 @@ export class LoggingInterceptor implements NestInterceptor {
             path: originalUrl,
             statusCode: response.statusCode,
             duration,
+            requestId: request.requestId,
           },
         });
       }),
@@ -53,6 +51,7 @@ export class LoggingInterceptor implements NestInterceptor {
             method,
             path: originalUrl,
             duration,
+            requestId: request.requestId,
           },
         });
 

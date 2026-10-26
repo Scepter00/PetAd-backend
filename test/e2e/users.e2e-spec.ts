@@ -21,7 +21,7 @@ interface ApiErrorBody {
   statusCode: number;
   code?: string;
   message: string | string[] | Record<string, unknown>;
-  reasons?: { code: string; references: string[] }[];
+  details?: string[] | { reasons?: { code: string; references: string[] }[] };
 }
 
 describe('Users profile hardening & account deletion (E2E)', () => {
@@ -149,8 +149,10 @@ describe('Users profile hardening & account deletion (E2E)', () => {
           .expect(400);
 
         const error = res.body as ApiErrorBody;
-        const messages = Array.isArray(error.message)
-          ? error.message
+        // The global exception filter keeps constraint violations under
+        // `details` and replaces `message` with a short summary.
+        const messages = Array.isArray(error.details)
+          ? error.details
           : [JSON.stringify(error.message)];
         expect(messages).toContain(
           `property ${Object.keys(body)[0]} should not exist`,
@@ -307,9 +309,10 @@ describe('Users profile hardening & account deletion (E2E)', () => {
 
       const error = res.body as ApiErrorBody;
       expect(error.code).toBe('ACCOUNT_DELETION_BLOCKED');
-      expect(error.reasons?.map((reason) => reason.code)).toContain(
-        'FUNDED_ESCROW',
-      );
+      const reasons = Array.isArray(error.details)
+        ? undefined
+        : error.details?.reasons;
+      expect(reasons?.map((reason) => reason.code)).toContain('FUNDED_ESCROW');
 
       const stored = await prisma.user.findUnique({ where: { id: user.id } });
       expect(stored?.status).toBe('ACTIVE');

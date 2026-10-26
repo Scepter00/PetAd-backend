@@ -9,9 +9,7 @@ import {
   Query,
   UseGuards,
   Request,
-} 
-
-from '@nestjs/common';
+} from '@nestjs/common';
 import {
   ApiTags,
   ApiOperation,
@@ -21,6 +19,7 @@ import {
   ApiBearerAuth,
 } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/guards/roles.decorator';
 import { PetsService } from './pets.service';
@@ -30,7 +29,6 @@ import { UpdatePetDto } from './dto/update-pet.dto';
 import { SearchPetsDto } from './dto/search-pets.dto';
 import { UserRole } from '../common/enums';
 import { SkipThrottle } from '@nestjs/throttler';
-
 
 @SkipThrottle()
 @ApiTags('Pets')
@@ -56,12 +54,13 @@ export class PetsController {
   }
 
   @Get()
+  @UseGuards(OptionalJwtAuthGuard)
   @ApiOperation({
     summary: 'List pets with pagination and filtering',
     description:
-      'Returns paginated list of pets with optional filtering and computed availability',
+      'Returns paginated list of pets with optional filtering and computed availability. ' +
+      'Listings owned by suspended accounts are omitted for anonymous and non-admin callers.',
   })
-  
   @ApiResponse({
     status: 200,
     description: 'Paginated pets list',
@@ -89,8 +88,11 @@ export class PetsController {
       },
     },
   })
-  async findAll(@Query() searchDto: SearchPetsDto) {
-    return this.petsService.findAll(searchDto);
+  async findAll(
+    @Query() searchDto: SearchPetsDto,
+    @Request() req: { user?: { userId?: string; role?: string } },
+  ) {
+    return this.petsService.findAll(searchDto, req.user ?? {});
   }
 
   @Get(':id')
@@ -198,7 +200,6 @@ export class PetsController {
       },
     },
   })
-
   @ApiResponse({ status: 403, description: 'Forbidden - Admin only' })
   @ApiResponse({ status: 404, description: 'Pet not found' })
   @ApiBearerAuth('JWT-auth')
@@ -215,7 +216,7 @@ export class PetsController {
   @ApiOperation({
     summary: 'Verify pet availability via event replay (admin only)',
     description:
-      'Replays the pet\'s event log to compute availability and compares it against the current DB state. ' +
+      "Replays the pet's event log to compute availability and compares it against the current DB state. " +
       'Returns a discrepancy report if the two differ.',
   })
   @ApiParam({ name: 'id', description: 'Pet ID' })
@@ -225,8 +226,9 @@ export class PetsController {
     schema: {
       example: {
         petId: '550e8400-e29b-41d4-a716-446655440000',
+        storedStatus: 'AVAILABLE',
         replayedStatus: 'AVAILABLE',
-        dbAvailable: true,
+        computedStatus: 'AVAILABLE',
         isMatch: true,
         eventCount: 3,
         message: 'Pet availability is correctly synchronized',
@@ -240,4 +242,3 @@ export class PetsController {
     return this.petsService.verifyAvailability(petId);
   }
 }
-
